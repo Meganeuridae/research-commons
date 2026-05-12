@@ -1,7 +1,12 @@
+import dotenv from 'dotenv';
+// Load .env BEFORE any other import reads from process.env. The order matters:
+// ESM hoists imports, but dotenv.config() is a function call that runs in
+// statement order, so this needs to come first.
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
-import dotenv from 'dotenv';
 import { SubmissionStore } from './storage/submission-store.js';
 import { AnnotationDatabase } from './database/db.js';
 import { UserStore } from './services/user-store.js';
@@ -10,6 +15,7 @@ import { OntologyStore } from './services/ontology-store.js';
 import { RankingStore } from './services/ranking-store.js';
 import { ModelStore } from './services/model-store.js';
 import { ParticipantMappingStore } from './services/participant-mapping-store.js';
+import { assertJwtSecret } from './middleware/auth.js';
 import { createAuthRoutes } from './routes/auth.js';
 import { createSubmissionRoutes } from './routes/submissions.js';
 import { createSubmissionSystemsRoutes } from './routes/submission-systems.js';
@@ -24,7 +30,8 @@ import { createDiscordPreviewRoutes } from './routes/discord-preview.js';
 import { createOgMetaRoutes, createOgMiddleware } from './routes/og-meta.js';
 import { EmailService } from './services/email-service.js';
 
-dotenv.config();
+// Fail fast on misconfiguration rather than waiting for the first request.
+assertJwtSecret();
 
 const PORT = process.env.PORT || 3020;
 const DATABASE_PATH = process.env.DATABASE_PATH || './data/research.db';
@@ -291,16 +298,20 @@ async function main() {
   });
 
   // Graceful shutdown
-  process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
+  const shutdown = async (signal: string) => {
+    console.log(`\nReceived ${signal}, shutting down...`);
     await submissionStore.close();
     annotationDb.close();
     await userStore.close();
     await researchStore.close();
     await ontologyStore.close();
     await rankingStore.close();
+    await modelStore.close();
+    await participantMappingStore.close();
     process.exit(0);
-  });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main().catch(err => {

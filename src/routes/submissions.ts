@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import jwt from 'jsonwebtoken';
 import { AppContext } from '../index.js';
-import { authenticateToken, AuthRequest, JWT_SECRET } from '../middleware/auth.js';
+import { authenticateToken, AuthRequest, parseAuthFromHeaders } from '../middleware/auth.js';
 import { CreateSubmissionRequestSchema, Message } from '../types/submission.js';
 
 export function createSubmissionRoutes(context: AppContext): Router {
@@ -12,23 +11,8 @@ export function createSubmissionRoutes(context: AppContext): Router {
   router.get('/', async (req, res) => {
     try {
       const allSubmissions = await context.submissionStore.listSubmissions();
-      
-      // Parse optional auth to determine visibility access
-      const authHeader = req.headers.authorization;
-      let userId: string | undefined;
-      let userRoles: string[] = [];
-      
-      if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          userId = decoded.userId;
-          userRoles = decoded.roles || [];
-        } catch (err) {
-          // Invalid token - treat as guest
-        }
-      }
-      
+
+      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
       const isResearcher = userRoles.includes('researcher') || userRoles.includes('admin');
       
       // Filter by visibility
@@ -261,22 +245,7 @@ export function createSubmissionRoutes(context: AppContext): Router {
         return;
       }
 
-      // Check visibility access
-      const authHeader = req.headers.authorization;
-      let userId: string | undefined;
-      let userRoles: string[] = [];
-      
-      if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          userId = decoded.userId;
-          userRoles = decoded.roles || [];
-        } catch (err) {
-          // Invalid token - treat as guest
-        }
-      }
-      
+      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
       const visibility = submission.visibility || 'public';
       const isResearcher = userRoles.includes('researcher') || userRoles.includes('admin');
       const isOwner = userId === submission.submitter_id;
@@ -552,45 +521,17 @@ export function createSubmissionRoutes(context: AppContext): Router {
         }
       }
 
-      // Filter hidden messages for non-privileged users
-      // Try to get user from token if present (optional auth)
-      const authHeader = req.headers.authorization;
-      let userRoles: string[] = [];
-      let userId: string | undefined;
-      
-      console.log('[GET messages] Auth header present:', !!authHeader);
-      console.log('[GET messages] Auth header value:', authHeader?.substring(0, 20) + '...');
-      
-      if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          console.log('[GET messages] Full decoded token:', JSON.stringify(decoded, null, 2));
-          userRoles = decoded.roles || [];
-          userId = decoded.userId;
-          console.log('[GET messages] Extracted - userId:', userId, 'roles:', userRoles);
-        } catch (err: any) {
-          console.log('[GET messages] Token decode failed:', err.message);
-          // Invalid/expired token - treat as guest
-        }
-      } else {
-        console.log('[GET messages] No Bearer token in auth header');
-      }
-      
-      console.log('[GET messages] Final user roles:', userRoles);
-      
+      // Filter hidden messages for non-privileged users (optional auth)
+      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
+
       // Redact hidden messages for non-privileged users (not researchers/admins/owners)
       const isResearcherOrAdmin = userRoles.includes('researcher') || userRoles.includes('admin');
       const isOwner = submission && userId === submission.submitter_id;
       const canViewHidden = isResearcherOrAdmin || isOwner;
-      
+
       const hiddenMessageIds = new Set(context.annotationDb.getHiddenMessagesBySubmission(req.params.submissionId));
-      
-      console.log('[GET messages] Hidden message IDs:', Array.from(hiddenMessageIds));
-      console.log('[GET messages] Is researcher/admin:', isResearcherOrAdmin);
-      console.log('[GET messages] Is owner:', isOwner);
-      console.log('[GET messages] Can view hidden:', canViewHidden);
-      
+
+
       if (!canViewHidden && hiddenMessageIds.size > 0) {
         // Replace content of hidden messages with block characters
         messages = messages.map(msg => {
