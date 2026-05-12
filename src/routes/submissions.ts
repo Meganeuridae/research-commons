@@ -138,12 +138,7 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Create submission
   router.post('/', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      console.log('[Submissions POST] Received request body:', JSON.stringify(req.body, null, 2));
-      console.log('[Submissions POST] User ID:', req.userId);
-      
       const data = CreateSubmissionRequestSchema.parse(req.body);
-      console.log('[Submissions POST] Validation passed');
-      
       const tempSubmissionId = uuidv4();
       
       // Convert request messages to full Message objects
@@ -214,22 +209,16 @@ export function createSubmissionRoutes(context: AppContext): Router {
 
       res.status(201).json(submission);
     } catch (error: any) {
-      console.error('[Submissions POST] Error occurred:', error);
-      console.error('[Submissions POST] Error name:', error.name);
-      console.error('[Submissions POST] Error message:', error.message);
-      
       if (error.name === 'ZodError') {
-        console.error('[Submissions POST] Zod validation errors:', JSON.stringify(error.errors, null, 2));
-        res.status(400).json({ 
-          error: 'Invalid request', 
+        res.status(400).json({
+          error: 'Invalid request',
           details: error.errors,
           message: 'Validation failed - check details for specific field errors'
         });
-      } else if (error.message.includes('tree')) {
-        console.error('[Submissions POST] Tree validation error');
+      } else if (error.message?.includes('tree')) {
         res.status(400).json({ error: error.message });
       } else {
-        console.error('[Submissions POST] Unexpected error:', error.stack);
+        console.error('Create submission failed:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
     }
@@ -572,7 +561,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
           }
           return msg;
         });
-        console.log('[GET messages] Redacted', hiddenMessageIds.size, 'messages');
       }
 
       res.json({ messages });
@@ -585,22 +573,15 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Hide a message (admin or owner only)
   router.post('/:submissionId/messages/:messageId/hide', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      console.log('[POST hide] Hiding message:', req.params.messageId, 'in submission:', req.params.submissionId);
-      
       const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      
       if (!submission) {
         res.status(404).json({ error: 'Submission not found' });
         return;
       }
 
-      // Check if user is admin or submission owner
       const user = await context.userStore.getUserById(req.userId!);
       const isAdmin = user?.roles.includes('admin');
       const isOwner = submission.submitter_id === req.userId;
-      
-      console.log('[POST hide] User:', req.userId, 'isAdmin:', isAdmin, 'isOwner:', isOwner);
-      
       if (!isAdmin && !isOwner) {
         res.status(403).json({ error: 'Only admins and submission owners can hide messages' });
         return;
@@ -608,9 +589,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
 
       const { reason } = req.body;
       context.annotationDb.hideMessage(req.params.messageId, req.params.submissionId, req.userId!, reason);
-      
-      console.log('[POST hide] Message hidden successfully');
-      
       res.json({ success: true });
     } catch (error) {
       console.error('Hide message error:', error);
@@ -650,44 +628,28 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Hide all previous messages (current message + all with order < current.order)
   router.post('/:submissionId/messages/:messageId/hide-previous', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      console.log('[POST hide-previous] Hiding message and all previous:', req.params.messageId);
-      
       const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      
       if (!submission) {
         res.status(404).json({ error: 'Submission not found' });
         return;
       }
 
-      // Check if user is admin or submission owner
       const user = await context.userStore.getUserById(req.userId!);
       const isAdmin = user?.roles.includes('admin');
       const isOwner = submission.submitter_id === req.userId;
-      
-      console.log('[POST hide-previous] User:', req.userId, 'isAdmin:', isAdmin, 'isOwner:', isOwner);
-      
       if (!isAdmin && !isOwner) {
         res.status(403).json({ error: 'Only admins and submission owners can hide messages' });
         return;
       }
 
-      // Get all messages for this submission
       const messages = await context.submissionStore.getMessages(req.params.submissionId);
-      
-      // Find the target message
       const targetMessage = messages.find(m => m.id === req.params.messageId);
       if (!targetMessage) {
         res.status(404).json({ error: 'Message not found' });
         return;
       }
-      
-      // Find all messages with order <= target message order
+
       const messagesToHide = messages.filter(m => m.order <= targetMessage.order);
-      
-      console.log('[POST hide-previous] Target message order:', targetMessage.order);
-      console.log('[POST hide-previous] Hiding', messagesToHide.length, 'messages');
-      
-      // Hide all of them
       const { reason } = req.body;
       let hiddenCount = 0;
       for (const message of messagesToHide) {
@@ -695,14 +657,11 @@ export function createSubmissionRoutes(context: AppContext): Router {
           context.annotationDb.hideMessage(message.id, req.params.submissionId, req.userId!, reason);
           hiddenCount++;
         } catch (err) {
-          console.error('[POST hide-previous] Failed to hide message:', message.id, err);
-          // Continue hiding others even if one fails
+          console.error('Failed to hide message:', message.id, err);
         }
       }
-      
-      console.log('[POST hide-previous] Successfully hidden', hiddenCount, 'messages');
-      
-      res.json({ 
+
+      res.json({
         success: true,
         hidden_count: hiddenCount,
         message_ids: messagesToHide.map(m => m.id)
@@ -740,8 +699,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
       await context.submissionStore.updateMessage(submissionId, messageId, {
         hidden_from_models: hidden === true ? true : undefined
       });
-      
-      console.log(`[POST hidden-from-models] Message ${messageId} hidden_from_models set to ${hidden}`);
       
       res.json({ success: true, hidden_from_models: hidden });
     } catch (error) {
@@ -797,8 +754,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
       await context.submissionStore.updateMessage(submissionId, messageId, {
         metadata: Object.keys(updatedMetadata).length > 0 ? updatedMetadata : undefined
       });
-      
-      console.log(`[POST monospace] Message ${messageId} monospace set to ${monospace}`);
       
       res.json({ success: true, monospace });
     } catch (error) {
