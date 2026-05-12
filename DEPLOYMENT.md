@@ -1,130 +1,121 @@
-# Deployment Guide - Railway
+# Deployment
 
-## Quick Deploy
+Anima Research Commons is deployed on Railway. This document is the single
+source of truth — older deploy notes are preserved under `docs/archive/`.
 
-### 1. Prepare Repository
+## Prerequisites
+
+- A Railway account
+- A GitHub repository connected to Railway
+- A JWT secret. Generate one with:
+  ```bash
+  openssl rand -hex 64
+  ```
+
+## First-time setup
+
+### 1. Create the Railway project
+
+1. railway.app → **New Project** → **Deploy from GitHub repo**.
+2. Select the `research-commons` repo.
+3. Railway will detect Node (Nixpacks) and start the first build.
+
+### 2. Environment variables
+
+In **Variables**, set at minimum:
+
+| Variable     | Value                              |
+| ------------ | ---------------------------------- |
+| `JWT_SECRET` | output of `openssl rand -hex 64`   |
+| `NODE_ENV`   | `production`                       |
+
+The server now refuses to start if `JWT_SECRET` is unset or still the
+placeholder value, so this step is mandatory.
+
+Optional variables (defaults shown):
+
+| Variable             | Default                       |
+| -------------------- | ----------------------------- |
+| `PORT`               | `3020`                        |
+| `DATABASE_PATH`      | `/app/data/research.db`       |
+| `SUBMISSIONS_PATH`   | `/app/data/submissions`       |
+| `DATA_PATH`          | `/app/data`                   |
+| `DISCORD_API_URL`    | unset (disables Discord import) |
+| `DISCORD_API_TOKEN`  | unset                         |
+| `RESEND_API_KEY`     | unset (disables password reset email) |
+| `FROM_EMAIL`         | `noreply@resend.dev`          |
+| `APP_URL`            | `http://localhost:5173`       |
+
+See `.env.example` for a local-development template.
+
+### 3. Persistent volume
+
+**Without this, data is wiped on every deploy.**
+
+Settings → Volumes → **+ New Volume**:
+
+- Mount Path: `/app/data`
+- Size: 1 GB to start
+
+### 4. Health check
+
+Railway picks up the `/health` endpoint automatically via `railway.toml`.
+
+## Build
+
+Railway runs (from `railway.toml`):
+
+```
+build:  nixpacks
+start:  npm start
+```
+
+`npm start` runs `node dist/index.js`, which serves both the API and the
+prebuilt frontend (`frontend/dist/`).
+
+Nixpacks runs `npm run build:full` (backend + frontend) automatically.
+
+## Post-deploy: create the first admin
+
+The app auto-seeds default ontologies, rankings, models, and a research topic
+on first boot. To create an admin user:
+
 ```bash
-# Ensure everything is committed
-git add .
-git commit -m "Prepare for Railway deployment"
-git push
+railway run npm run admin:create
 ```
 
-### 2. Railway Setup
+This prompts for email/password/name and assigns the `admin` and `researcher`
+roles in the JSONL user store.
 
-1. Go to [railway.app](https://railway.app)
-2. Click "New Project" → "Deploy from GitHub repo"
-3. Select `research-commons` repository
-4. Railway will auto-detect the Node.js app
-
-### 3. Configure Environment Variables
-
-In Railway dashboard, add these variables:
-
-**Required:**
-```
-PORT=3020
-NODE_ENV=production
-JWT_SECRET=<generate-with-openssl-rand-base64-32>
-```
-
-**Optional (with defaults):**
-```
-DATABASE_PATH=/app/data/research.db
-SUBMISSIONS_PATH=/app/data/submissions
-DATA_PATH=/app/data
-```
-
-### 4. Add Persistent Volume
-
-Railway → Settings → Volumes:
-- **Mount Path:** `/app/data`
-- **Size:** 1GB (or more based on usage)
-
-This ensures your database and submissions persist across deployments.
-
-### 5. Deploy
-
-Railway will automatically:
-1. Build backend (TypeScript → JavaScript)
-2. Build frontend (Vue → static files)
-3. Run initialization (create default ontologies, rankings, models)
-4. Start the server
-
-## Frontend Configuration
-
-The frontend needs to know the backend URL:
-
-**Option A: Serve frontend from backend** (Recommended)
-
-Add to `src/index.ts`:
-```typescript
-// Serve frontend in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static('frontend/dist'))
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/dist/index.html'))
-  })
-}
-```
-
-**Option B: Separate deployments**
-
-Deploy frontend separately and set:
-```
-VITE_API_URL=https://your-backend.railway.app
-```
-
-## Post-Deployment
-
-### Create Admin User
+To promote an existing user instead:
 
 ```bash
-# SSH into Railway container or use Railway CLI
-railway run npx tsx create-admin-user.ts
+railway run npm run admin:promote -- user@example.com
 ```
 
-### Verify Setup
+(Replaces the old `make-admin.sh`, which silently did nothing because it
+targeted a SQLite `user_roles` table that does not exist.)
 
-1. Visit your Railway URL
-2. Register/login
-3. Check `/models`, `/ontologies`, `/rankings` have defaults
-4. Upload a test conversation
-5. Test annotation workflow
+## Verifying
 
-## Monitoring
-
-Railway provides:
-- **Logs** - Real-time application logs
-- **Metrics** - CPU, memory, network usage
-- **Deployments** - History and rollback
+1. Visit the Railway URL.
+2. `GET /health` should return `{"status":"ok"}`.
+3. Register an account, then promote it via `npm run admin:promote`.
+4. `/models`, `/ontologies`, `/rankings`, `/topics` should each show the
+   seeded defaults.
+5. Submit a test conversation, annotate it, and confirm it persists after a
+   Railway redeploy (the volume is doing its job).
 
 ## Troubleshooting
 
-**Issue: Database resets on deploy**
-→ Ensure volume is mounted at `/app/data`
+| Symptom                              | Likely cause                                          |
+| ------------------------------------ | ----------------------------------------------------- |
+| Boot fails with `JWT_SECRET is not set` | Missing or placeholder secret — see step 2.        |
+| Data resets on every deploy          | Volume not mounted at `/app/data`.                    |
+| Discord import disabled at boot      | `DISCORD_API_URL` / `DISCORD_API_TOKEN` unset.        |
+| Password reset emails silent         | `RESEND_API_KEY` unset.                                |
 
-**Issue: CORS errors**
-→ Check FRONTEND_URL env var matches your domain
+## Cost (rough)
 
-**Issue: Build fails**
-→ Check Node.js version (needs 20+)
-→ Check all dependencies in package.json
-
-## Cost Estimate
-
-Railway pricing:
-- **Hobby Plan:** $5/month
-- **Compute:** ~$0.01/hour per GB RAM
-- **Volume:** $0.25/GB/month
-
-Expected: **~$10-15/month** for research platform with light usage
-
-## Scaling Considerations
-
-When you get more traffic:
-- Enable **horizontal scaling** (multiple instances)
-- Use **PostgreSQL** instead of SQLite
-- Add **Redis** for session management
-- Consider **CDN** for frontend assets
-
+Railway Hobby plan ($5/month base) plus compute (cheap for this workload) plus
+volume ($0.25/GB/month). Expect roughly $10/month for a low-traffic instance.
