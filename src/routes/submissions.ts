@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { AppContext } from '../index.js';
 import { authenticateToken, AuthRequest, parseAuthFromHeaders } from '../middleware/auth.js';
-import { CreateSubmissionRequestSchema, Message } from '../types/submission.js';
+import { CreateSubmissionRequestSchema, UpdateSubmissionRequestSchema, Message } from '../types/submission.js';
 
 export function createSubmissionRoutes(context: AppContext): Router {
   const router = Router();
@@ -374,41 +374,28 @@ export function createSubmissionRoutes(context: AppContext): Router {
         return;
       }
 
-      const oldTags = submission.metadata.tags || [];
-      
-      // Update title
-      if (req.body.title !== undefined) {
-        submission.title = req.body.title;
+      // Strict allowlist for body fields; rejects mass-assignment attempts
+      // like { submitter_id: ..., roles: ... }.
+      const updates = UpdateSubmissionRequestSchema.parse(req.body);
+
+      if (updates.visibility !== undefined && !canEditVisibility) {
+        res.status(403).json({ error: 'Only the owner or admin can change visibility' });
+        return;
       }
-      
-      // Update visibility (only owner + admin)
-      if (req.body.visibility !== undefined) {
-        if (!canEditVisibility) {
-          res.status(403).json({ error: 'Only the owner or admin can change visibility' });
-          return;
-        }
-        const validVisibilities = ['public', 'unlisted', 'researcher', 'private'];
-        if (!validVisibilities.includes(req.body.visibility)) {
-          res.status(400).json({ error: 'Invalid visibility value' });
-          return;
-        }
-        submission.visibility = req.body.visibility;
-      }
-      
-      // Update metadata
-      if (req.body.description !== undefined) {
-        submission.metadata.description = req.body.description;
-      }
-      if (req.body.tags !== undefined) {
-        submission.metadata.tags = req.body.tags;
-      }
+
+      if (updates.title !== undefined) submission.title = updates.title;
+      if (updates.visibility !== undefined) submission.visibility = updates.visibility;
+      if (updates.description !== undefined) submission.metadata.description = updates.description;
+      if (updates.tags !== undefined) submission.metadata.tags = updates.tags;
 
       await context.submissionStore.updateSubmission(req.params.submissionId, submission);
 
-      // Don't attach on tag change - will be dynamically looked up from topics
-
       res.json(submission);
-    } catch (error) {
+    } catch (error: any) {
+      if (error.name === 'ZodError') {
+        res.status(400).json({ error: 'Invalid request', details: error.errors });
+        return;
+      }
       console.error('Update submission error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }

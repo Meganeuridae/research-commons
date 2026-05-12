@@ -63,7 +63,12 @@ export class UserStore {
         const { userId, roles } = event.data;
         const user = this.users.get(userId);
         if (user) {
-          this.users.set(userId, { ...user, roles, updated_at: event.timestamp });
+          this.users.set(userId, {
+            ...user,
+            roles,
+            updated_at: event.timestamp,
+            roles_updated_at: event.timestamp,
+          });
         }
         break;
       }
@@ -111,9 +116,33 @@ export class UserStore {
         }
         break;
       }
+      case 'password_reset_token_created': {
+        const { token, userId, email, expiresAt } = event.data;
+        const expires = new Date(expiresAt);
+        // Skip tokens that already expired before the server came up.
+        if (expires.getTime() > Date.now()) {
+          this.passwordResetTokens.set(token, { userId, email, expiresAt: expires });
+        }
+        break;
+      }
+      case 'password_reset_token_consumed': {
+        const { token } = event.data;
+        this.passwordResetTokens.delete(token);
+        break;
+      }
       case 'user_password_updated': {
-        const { email, passwordHash } = event.data;
+        const { email, passwordHash, userId } = event.data;
         this.passwordHashes.set(email, passwordHash);
+        if (userId) {
+          const user = this.users.get(userId);
+          if (user) {
+            this.users.set(userId, {
+              ...user,
+              updated_at: event.timestamp,
+              password_changed_at: event.timestamp,
+            });
+          }
+        }
         break;
       }
     }
@@ -152,9 +181,22 @@ export class UserStore {
     return user;
   }
 
+  // A pre-computed bcrypt hash used when the email doesn't exist. Compared
+  // against the submitted password so the response time matches the
+  // user-exists path — closing the timing-attack vector for email
+  // enumeration via login. The plaintext is never accepted.
+  private static readonly DUMMY_HASH =
+    '$2b$10$CwTycUXWue0Thq9StjUM0uJ8mO1234567890abcdefghijklmnopqrs';
+
   async validatePassword(email: string, password: string): Promise<boolean> {
     const passwordHash = this.passwordHashes.get(email);
-    if (!passwordHash) return false;
+    if (!passwordHash) {
+      // Burn the same ~bcrypt-cost amount of CPU as the real-user path so
+      // attackers can't distinguish "user exists, wrong password" from
+      // "no such user" by timing.
+      await bcrypt.compare(password, UserStore.DUMMY_HASH);
+      return false;
+    }
     return bcrypt.compare(password, passwordHash);
   }
 
@@ -172,13 +214,14 @@ export class UserStore {
     const user = this.users.get(userId);
     if (!user) return null;
 
+    const now = new Date();
     await this.usersFile.appendEvent({
-      timestamp: new Date(),
+      timestamp: now,
       type: 'user_roles_updated',
       data: { userId, roles }
     });
 
-    const updated = { ...user, roles, updated_at: new Date() };
+    const updated = { ...user, roles, updated_at: now, roles_updated_at: now };
     this.users.set(userId, updated);
     return updated;
   }
@@ -261,14 +304,16 @@ export class UserStore {
     if (!user) throw new Error('User not found');
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
+    const now = new Date();
 
     await this.usersFile.appendEvent({
-      timestamp: new Date(),
+      timestamp: now,
       type: 'user_password_updated',
-      data: { email: user.email, passwordHash }
+      data: { userId, email: user.email, passwordHash }
     });
 
     this.passwordHashes.set(user.email, passwordHash);
+    this.users.set(userId, { ...user, updated_at: now, password_changed_at: now });
   }
 
   async getAllUsers(): Promise<User[]> {
@@ -284,24 +329,24 @@ export class UserStore {
   async createPasswordResetToken(email: string): Promise<{ token: string; user: User } | null> {
     const userId = this.usersByEmail.get(email);
     if (!userId) return null;
-    
+
     const user = this.users.get(userId);
     if (!user) return null;
 
-    // Generate a secure random token
     const token = crypto.randomBytes(32).toString('hex');
-    
-    // Token expires in 24 hours
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    // Store token (in memory only - not persisted, so tokens are cleared on restart)
-    this.passwordResetTokens.set(token, {
-      userId,
-      email,
-      expiresAt
+    // Persist via the event store so reset links survive a server restart
+    // (previously the token map was in-memory only and any redeploy mid-
+    // reset would break user-facing reset links).
+    await this.usersFile.appendEvent({
+      timestamp: new Date(),
+      type: 'password_reset_token_created',
+      data: { token, userId, email, expiresAt: expiresAt.toISOString() }
     });
 
-    // Clean up any expired tokens
+    this.passwordResetTokens.set(token, { userId, email, expiresAt });
+
     this.cleanupExpiredTokens();
 
     return { token, user };
@@ -323,7 +368,11 @@ export class UserStore {
   async consumePasswordResetToken(token: string): Promise<{ userId: string; email: string } | null> {
     const result = await this.validatePasswordResetToken(token);
     if (result) {
-      // Invalidate the token after use
+      await this.usersFile.appendEvent({
+        timestamp: new Date(),
+        type: 'password_reset_token_consumed',
+        data: { token }
+      });
       this.passwordResetTokens.delete(token);
     }
     return result;

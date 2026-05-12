@@ -1,11 +1,27 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { User } from '../types/research.js';
+import type { UserStore } from '../services/user-store.js';
 
 export interface DecodedToken {
   userId: string;
   email: string;
   roles: User['roles'];
+  iat?: number; // jwt.sign sets this automatically
+  exp?: number;
+}
+
+/**
+ * Returns true if the token's issued-at predates the user's most recent
+ * password change or role update — meaning the token should be rejected.
+ * Legacy users without these fields are treated as never-revoked.
+ */
+export function isTokenRevoked(decoded: DecodedToken, user: User): boolean {
+  if (!decoded.iat) return false;
+  const issuedAtMs = decoded.iat * 1000;
+  if (user.password_changed_at && new Date(user.password_changed_at).getTime() > issuedAtMs) return true;
+  if (user.roles_updated_at && new Date(user.roles_updated_at).getTime() > issuedAtMs) return true;
+  return false;
 }
 
 export interface AuthRequest extends Request {
@@ -14,6 +30,17 @@ export interface AuthRequest extends Request {
 }
 
 let _cachedJwtSecret: string | null = null;
+let _userStoreRef: UserStore | null = null;
+
+/**
+ * Wire a UserStore into the auth middleware so authenticateToken can check
+ * each token against the user's password_changed_at / roles_updated_at
+ * timestamps and reject tokens issued before those changes. Called once at
+ * startup from src/index.ts.
+ */
+export function setAuthUserStore(userStore: UserStore): void {
+  _userStoreRef = userStore;
+}
 
 /**
  * Read JWT_SECRET lazily so dotenv has a chance to populate process.env first,
@@ -67,21 +94,41 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
     return;
   }
 
-  jwt.verify(token, getJwtSecret(), (err, decoded) => {
+  jwt.verify(token, getJwtSecret(), async (err, decoded) => {
     if (err || !decoded || typeof decoded === 'string') {
       res.status(403).json({ error: 'Invalid or expired token' });
       return;
     }
 
     const payload = decoded as DecodedToken;
-    req.userId = payload.userId;
-    req.user = {
-      id: payload.userId,
-      email: payload.email,
-      roles: payload.roles,
-      name: '', // Will be filled from DB if needed
-      created_at: new Date()
-    };
+
+    // Revocation check: if the user's password or roles changed after this
+    // token was issued, reject it. _userStoreRef may be null in tests that
+    // don't wire it up; in that case skip the check.
+    if (_userStoreRef) {
+      const user = await _userStoreRef.getUserById(payload.userId);
+      if (!user) {
+        res.status(403).json({ error: 'User no longer exists' });
+        return;
+      }
+      if (isTokenRevoked(payload, user)) {
+        res.status(403).json({ error: 'Token revoked. Please log in again.' });
+        return;
+      }
+      // Use fresh role data — protects against the case where a JWT carries
+      // stale roles (e.g. user demoted) but is otherwise valid.
+      req.userId = user.id;
+      req.user = user;
+    } else {
+      req.userId = payload.userId;
+      req.user = {
+        id: payload.userId,
+        email: payload.email,
+        roles: payload.roles,
+        name: '',
+        created_at: new Date()
+      };
+    }
     next();
   });
 }

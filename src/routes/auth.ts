@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { AppContext } from '../index.js';
 import { generateToken, authenticateToken, AuthRequest } from '../middleware/auth.js';
@@ -13,11 +14,40 @@ const ResetPasswordRequestSchema = z.object({
   newPassword: z.string().min(8, 'Password must be at least 8 characters')
 });
 
+// Tight limits for credential-handling endpoints to slow brute force,
+// credential stuffing, and email enumeration. Keyed by IP by default.
+// In tests (NODE_ENV=test) these are disabled so suites can hammer endpoints.
+const TEST_MODE = process.env.NODE_ENV === 'test';
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: TEST_MODE ? 0 : 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again later.' },
+  skip: () => TEST_MODE,
+});
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: TEST_MODE ? 0 : 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many registration attempts. Please try again later.' },
+  skip: () => TEST_MODE,
+});
+const passwordResetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: TEST_MODE ? 0 : 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password reset requests. Please try again later.' },
+  skip: () => TEST_MODE,
+});
+
 export function createAuthRoutes(context: AppContext): Router {
   const router = Router();
 
   // Register new user
-  router.post('/register', async (req, res) => {
+  router.post('/register', registerLimiter, async (req, res) => {
     try {
       const { email, password, name } = RegisterUserRequestSchema.parse(req.body);
 
@@ -68,7 +98,7 @@ export function createAuthRoutes(context: AppContext): Router {
   });
 
   // Login
-  router.post('/login', async (req, res) => {
+  router.post('/login', loginLimiter, async (req, res) => {
     try {
       const { email, password } = LoginRequestSchema.parse(req.body);
 
@@ -319,7 +349,7 @@ export function createAuthRoutes(context: AppContext): Router {
   });
 
   // Request password reset (sends email)
-  router.post('/forgot-password', async (req, res) => {
+  router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     try {
       const { email } = ForgotPasswordRequestSchema.parse(req.body);
 
@@ -367,7 +397,7 @@ export function createAuthRoutes(context: AppContext): Router {
   });
 
   // Reset password with token
-  router.post('/reset-password', async (req, res) => {
+  router.post('/reset-password', passwordResetLimiter, async (req, res) => {
     try {
       const { token, newPassword } = ResetPasswordRequestSchema.parse(req.body);
 

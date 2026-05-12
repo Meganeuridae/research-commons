@@ -7,6 +7,7 @@ dotenv.config();
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
+import helmet from 'helmet';
 import { SubmissionStore } from './storage/submission-store.js';
 import { AnnotationDatabase } from './database/db.js';
 import { UserStore } from './services/user-store.js';
@@ -15,7 +16,8 @@ import { OntologyStore } from './services/ontology-store.js';
 import { RankingStore } from './services/ranking-store.js';
 import { ModelStore } from './services/model-store.js';
 import { ParticipantMappingStore } from './services/participant-mapping-store.js';
-import { assertJwtSecret } from './middleware/auth.js';
+import { AuditStore } from './services/audit-store.js';
+import { assertJwtSecret, setAuthUserStore } from './middleware/auth.js';
 import { createAuthRoutes } from './routes/auth.js';
 import { createSubmissionRoutes } from './routes/submissions.js';
 import { createSubmissionSystemsRoutes } from './routes/submission-systems.js';
@@ -57,6 +59,7 @@ export interface AppContext {
   rankingStore: RankingStore;
   modelStore: ModelStore;
   participantMappingStore: ParticipantMappingStore;
+  auditStore: AuditStore;
   discordConfig: {
     apiUrl: string | undefined;
     apiToken: string | undefined;
@@ -64,11 +67,46 @@ export interface AppContext {
   emailService: EmailService | null;
 }
 
+function parseAllowedOrigins(): string[] | undefined {
+  const raw = process.env.ALLOWED_ORIGINS;
+  if (!raw) return undefined;
+  return raw.split(',').map(s => s.trim()).filter(Boolean);
+}
+
 async function main() {
   const app = express();
 
-  // Middleware
-  app.use(cors());
+  // Behind Railway's edge proxy. Trust one hop so the rate limiter and
+  // any client-IP logging see the actual client IP, not the proxy.
+  app.set('trust proxy', 1);
+
+  // Standard security headers (CSP, X-Frame-Options, X-Content-Type-Options,
+  // Referrer-Policy, etc.). We disable helmet's default Content-Security-Policy
+  // because the SPA loads from / and the dev server uses inline scripts in
+  // index.html; configure CSP explicitly later if/when we know the asset graph.
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }));
+
+  // CORS: in production, restrict to an explicit allowlist (set via the
+  // ALLOWED_ORIGINS env var as a comma-separated list, e.g.
+  // "https://commons.animalabs.ai,https://staging.animalabs.ai"). In dev, fall
+  // back to permissive CORS so localhost:5173 (vite) can hit localhost:3020.
+  const allowedOrigins = parseAllowedOrigins();
+  if (allowedOrigins && allowedOrigins.length > 0) {
+    app.use(cors({
+      origin: allowedOrigins,
+      credentials: false,
+      methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization']
+    }));
+  } else {
+    if (process.env.NODE_ENV === 'production') {
+      console.warn('⚠️  ALLOWED_ORIGINS is not set; allowing all origins. Set it in production.');
+    }
+    app.use(cors());
+  }
   app.use(compression()); // Gzip compress all responses
   app.use(express.json({ limit: '50mb' })); // Large submissions with images
 
@@ -83,14 +121,19 @@ async function main() {
   const rankingStore = new RankingStore(DATA_PATH);
   const modelStore = new ModelStore(DATA_PATH);
   const participantMappingStore = new ParticipantMappingStore(DATA_PATH);
+  const auditStore = new AuditStore(DATA_PATH);
 
   await submissionStore.init();
   await userStore.init();
+  // Wire userStore into the auth middleware so token-revocation timestamps
+  // (password_changed_at, roles_updated_at) are checked on each request.
+  setAuthUserStore(userStore);
   await researchStore.init();
   await ontologyStore.init();
   await rankingStore.init();
   await modelStore.init();
   await participantMappingStore.init();
+  await auditStore.init();
 
   // Auto-create defaults if needed (idempotent — only seeds empty collections)
   await seedDefaultsIfMissing({ ontologyStore, rankingStore, modelStore, researchStore });
@@ -112,6 +155,7 @@ async function main() {
     rankingStore,
     modelStore,
     participantMappingStore,
+    auditStore,
     discordConfig: {
       apiUrl: DISCORD_API_URL,
       apiToken: DISCORD_API_TOKEN
@@ -166,7 +210,7 @@ async function main() {
     if (!DISCORD_API_URL || !DISCORD_API_TOKEN) {
       console.warn(`⚠️  Discord import disabled: DISCORD_API_URL and DISCORD_API_TOKEN must be set`);
     } else {
-      console.log(`🎮 Discord import enabled (API: ${DISCORD_API_URL})`);
+      console.log(`🎮 Discord import enabled`);
     }
     if (!RESEND_API_KEY) {
       console.warn(`⚠️  Email disabled: RESEND_API_KEY must be set for password reset`);
@@ -186,6 +230,7 @@ async function main() {
     await rankingStore.close();
     await modelStore.close();
     await participantMappingStore.close();
+    await auditStore.close();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
