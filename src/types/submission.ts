@@ -134,14 +134,29 @@ export const CreateMessageRequestSchema = z.object({
 
 // For API requests
 export const CreateSubmissionRequestSchema = z.object({
-  title: z.string(),
+  title: z.string().min(1).max(500),
   submission_type: SubmissionTypeSchema.optional(), // defaults to 'conversation'
   source_type: z.enum(['arc-certified', 'json-upload', 'discord', 'other']),
   visibility: VisibilitySchema.optional(), // defaults to 'researcher' in store
   arc_conversation_id: z.string().optional(),
-  messages: z.array(CreateMessageRequestSchema),
+  // Cap message count to bound memory + disk per submission. 5k is well
+  // above any real conversation; combined with the 50MB body limit it bounds
+  // a single submission's resource cost.
+  messages: z.array(CreateMessageRequestSchema).min(1).max(5000),
   metadata: z.record(z.unknown()).optional()
 });
 
 export type CreateSubmissionRequest = z.infer<typeof CreateSubmissionRequestSchema>;
+
+// Strict allowlist for PATCH /submissions/:id. Anything not listed here is
+// rejected — prevents mass-assignment of fields like submitter_id or
+// submitted_at via crafted request bodies.
+export const UpdateSubmissionRequestSchema = z.object({
+  title: z.string().min(1).max(500).optional(),
+  visibility: VisibilitySchema.optional(),
+  description: z.string().max(10000).optional(),
+  tags: z.array(z.string()).max(100).optional(),
+}).strict();
+
+export type UpdateSubmissionRequest = z.infer<typeof UpdateSubmissionRequestSchema>;
 

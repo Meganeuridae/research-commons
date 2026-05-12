@@ -23,7 +23,13 @@ export const UserSchema = z.object({
   name: z.string(),
   roles: z.array(z.enum(['viewer', 'contributor', 'rater', 'expert', 'researcher', 'agent', 'admin'])),
   created_at: z.date(),
-  updated_at: z.date().optional()
+  updated_at: z.date().optional(),
+  // Bumped when the password or roles change. Used to invalidate any JWT
+  // issued before the change (compared against the JWT's `iat` claim in the
+  // auth middleware). Optional because existing users predate the field;
+  // missing = treated as never-revoked.
+  password_changed_at: z.date().optional(),
+  roles_updated_at: z.date().optional(),
 });
 
 export type User = z.infer<typeof UserSchema>;
