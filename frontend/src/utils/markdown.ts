@@ -1,10 +1,32 @@
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 // Configure marked for safe rendering
 marked.setOptions({
   breaks: true, // Convert \n to <br>
   gfm: true     // GitHub Flavored Markdown
 })
+
+// Allow @mention spans we emit ourselves; block everything dangerous. We
+// don't permit form elements, raw scripts, event handlers, or javascript:
+// URIs. The default DOMPurify config blocks <script>, <iframe>, on* attrs,
+// and most XSS vectors out of the box; we tighten it further.
+const PURIFY_CONFIG: DOMPurify.Config = {
+  ALLOWED_TAGS: [
+    'p', 'br', 'hr',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins', 'mark',
+    'a',
+    'ul', 'ol', 'li',
+    'blockquote',
+    'code', 'pre',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'span',
+  ],
+  ALLOWED_ATTR: ['href', 'title', 'class'],
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+  FORBID_ATTR: ['style', 'srcset'],
+}
 
 /**
  * Escape HTML-like patterns that aren't valid HTML tags
@@ -43,15 +65,23 @@ function styleMentions(html: string): string {
 }
 
 /**
- * Render markdown to HTML
+ * Render markdown to HTML, sanitizing against XSS.
+ *
+ * The pipeline is:
+ *   1. Escape chat-style pseudo-tags (<reply:user>, <end of turn>, etc.) so
+ *      marked doesn't try to interpret them as HTML.
+ *   2. Run marked to produce HTML.
+ *   3. Run DOMPurify to strip anything dangerous (script tags, on* handlers,
+ *      javascript: URIs, etc.). Without this step, user-submitted content
+ *      like <img src=x onerror="..."> would execute in other users' browsers.
+ *   4. Apply our @mention styling.
  */
 export function renderMarkdown(text: string): string {
   if (!text) return ''
-  // First escape non-HTML tags to prevent them from being parsed as HTML
   const escaped = escapeNonHtmlTags(text)
-  const html = marked.parse(escaped) as string
-  // Then style mentions
-  return styleMentions(html)
+  const rawHtml = marked.parse(escaped) as string
+  const safeHtml = DOMPurify.sanitize(rawHtml, PURIFY_CONFIG)
+  return styleMentions(safeHtml)
 }
 
 /**
