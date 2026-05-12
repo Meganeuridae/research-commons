@@ -10,7 +10,10 @@
     "build:backend": "tsc",
     "build:frontend": "cd frontend && npm run build",
     "start": "node dist/index.js",
-    "migrate": "tsx src/database/migrate.ts"
+    "migrate": "tsx src/database/migrate.ts",
+    "seed:defaults": "tsx scripts/seed-defaults.ts",
+    "admin:create": "tsx scripts/create-admin.ts",
+    "admin:promote": "tsx scripts/promote-admin.ts"
   },
   "dependencies": {
     "@types/compression": "^1.8.1",

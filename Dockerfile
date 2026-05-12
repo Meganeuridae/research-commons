@@ -36,12 +36,7 @@ COPY --from=backend-builder /app/src/database/schema.sql ./dist/database/
 # Copy built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Copy initialization scripts
-COPY create-default-ontologies.ts ./
-COPY create-default-rankings.ts ./
-COPY create-default-models.ts ./
-
-# Create data directory
+# Create data directory (will be mounted as a volume in production)
 RUN mkdir -p /app/data
 
 # Expose port

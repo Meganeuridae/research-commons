@@ -5,6 +5,15 @@ dist/
 .env
 .env.local
 
+# Editor / IDE artifacts
+# SSHFS / sftp-fuse lock files (e.g. .!99900!foo.vue)
+.!*
+# Emacs backup / lock files
+*~
+.#*
+.idea/
+.vscode/
+
 # Data (keep structure, ignore content)
 data/*.db*
 data/*.jsonl
