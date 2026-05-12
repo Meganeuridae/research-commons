@@ -13,7 +13,9 @@
     "migrate": "tsx src/database/migrate.ts",
     "seed:defaults": "tsx scripts/seed-defaults.ts",
     "admin:create": "tsx scripts/create-admin.ts",
-    "admin:promote": "tsx scripts/promote-admin.ts"
+    "admin:promote": "tsx scripts/promote-admin.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@types/compression": "^1.8.1",
@@ -36,8 +38,11 @@
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.11.0",
+    "@types/supertest": "^7.2.0",
     "@types/uuid": "^9.0.8",
+    "supertest": "^7.2.2",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.6"
   }
 }
