@@ -1,10 +1,9 @@
-#!/usr/bin/env node
-
+#!/usr/bin/env tsx
 /**
- * Create an admin user (for initial setup)
+ * Create an admin user (for initial setup).
  */
-
-import { UserStore } from './src/services/user-store.js';
+import 'dotenv/config';
+import { UserStore } from '../src/services/user-store.js';
 import * as readline from 'readline';
 
 const DATA_PATH = process.env.DATA_PATH || './data';

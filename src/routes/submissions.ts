@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import jwt from 'jsonwebtoken';
 import { AppContext } from '../index.js';
-import { authenticateToken, AuthRequest, JWT_SECRET } from '../middleware/auth.js';
+import { authenticateToken, AuthRequest, parseAuthFromHeaders } from '../middleware/auth.js';
 import { CreateSubmissionRequestSchema, Message } from '../types/submission.js';
 
 export function createSubmissionRoutes(context: AppContext): Router {
@@ -12,23 +11,8 @@ export function createSubmissionRoutes(context: AppContext): Router {
   router.get('/', async (req, res) => {
     try {
       const allSubmissions = await context.submissionStore.listSubmissions();
-      
-      // Parse optional auth to determine visibility access
-      const authHeader = req.headers.authorization;
-      let userId: string | undefined;
-      let userRoles: string[] = [];
-      
-      if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          userId = decoded.userId;
-          userRoles = decoded.roles || [];
-        } catch (err) {
-          // Invalid token - treat as guest
-        }
-      }
-      
+
+      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
       const isResearcher = userRoles.includes('researcher') || userRoles.includes('admin');
       
       // Filter by visibility
@@ -154,12 +138,7 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Create submission
   router.post('/', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      console.log('[Submissions POST] Received request body:', JSON.stringify(req.body, null, 2));
-      console.log('[Submissions POST] User ID:', req.userId);
-      
       const data = CreateSubmissionRequestSchema.parse(req.body);
-      console.log('[Submissions POST] Validation passed');
-      
       const tempSubmissionId = uuidv4();
       
       // Convert request messages to full Message objects
@@ -230,22 +209,16 @@ export function createSubmissionRoutes(context: AppContext): Router {
 
       res.status(201).json(submission);
     } catch (error: any) {
-      console.error('[Submissions POST] Error occurred:', error);
-      console.error('[Submissions POST] Error name:', error.name);
-      console.error('[Submissions POST] Error message:', error.message);
-      
       if (error.name === 'ZodError') {
-        console.error('[Submissions POST] Zod validation errors:', JSON.stringify(error.errors, null, 2));
-        res.status(400).json({ 
-          error: 'Invalid request', 
+        res.status(400).json({
+          error: 'Invalid request',
           details: error.errors,
           message: 'Validation failed - check details for specific field errors'
         });
-      } else if (error.message.includes('tree')) {
-        console.error('[Submissions POST] Tree validation error');
+      } else if (error.message?.includes('tree')) {
         res.status(400).json({ error: error.message });
       } else {
-        console.error('[Submissions POST] Unexpected error:', error.stack);
+        console.error('Create submission failed:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
     }
@@ -261,22 +234,7 @@ export function createSubmissionRoutes(context: AppContext): Router {
         return;
       }
 
-      // Check visibility access
-      const authHeader = req.headers.authorization;
-      let userId: string | undefined;
-      let userRoles: string[] = [];
-      
-      if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          userId = decoded.userId;
-          userRoles = decoded.roles || [];
-        } catch (err) {
-          // Invalid token - treat as guest
-        }
-      }
-      
+      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
       const visibility = submission.visibility || 'public';
       const isResearcher = userRoles.includes('researcher') || userRoles.includes('admin');
       const isOwner = userId === submission.submitter_id;
@@ -370,11 +328,9 @@ export function createSubmissionRoutes(context: AppContext): Router {
         return;
       }
 
-      // Remove pinned_message_id from metadata
-      const updatedMetadata = {
-        ...submission.metadata
-      };
-      delete (updatedMetadata as any).pinned_message_id;
+      // pinned_message_id is .optional() in the schema, so delete is typesafe
+      const updatedMetadata = { ...submission.metadata };
+      delete updatedMetadata.pinned_message_id;
 
       const updatedSubmission = {
         ...submission,
@@ -552,45 +508,17 @@ export function createSubmissionRoutes(context: AppContext): Router {
         }
       }
 
-      // Filter hidden messages for non-privileged users
-      // Try to get user from token if present (optional auth)
-      const authHeader = req.headers.authorization;
-      let userRoles: string[] = [];
-      let userId: string | undefined;
-      
-      console.log('[GET messages] Auth header present:', !!authHeader);
-      console.log('[GET messages] Auth header value:', authHeader?.substring(0, 20) + '...');
-      
-      if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          console.log('[GET messages] Full decoded token:', JSON.stringify(decoded, null, 2));
-          userRoles = decoded.roles || [];
-          userId = decoded.userId;
-          console.log('[GET messages] Extracted - userId:', userId, 'roles:', userRoles);
-        } catch (err: any) {
-          console.log('[GET messages] Token decode failed:', err.message);
-          // Invalid/expired token - treat as guest
-        }
-      } else {
-        console.log('[GET messages] No Bearer token in auth header');
-      }
-      
-      console.log('[GET messages] Final user roles:', userRoles);
-      
+      // Filter hidden messages for non-privileged users (optional auth)
+      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
+
       // Redact hidden messages for non-privileged users (not researchers/admins/owners)
       const isResearcherOrAdmin = userRoles.includes('researcher') || userRoles.includes('admin');
       const isOwner = submission && userId === submission.submitter_id;
       const canViewHidden = isResearcherOrAdmin || isOwner;
-      
+
       const hiddenMessageIds = new Set(context.annotationDb.getHiddenMessagesBySubmission(req.params.submissionId));
-      
-      console.log('[GET messages] Hidden message IDs:', Array.from(hiddenMessageIds));
-      console.log('[GET messages] Is researcher/admin:', isResearcherOrAdmin);
-      console.log('[GET messages] Is owner:', isOwner);
-      console.log('[GET messages] Can view hidden:', canViewHidden);
-      
+
+
       if (!canViewHidden && hiddenMessageIds.size > 0) {
         // Replace content of hidden messages with block characters
         messages = messages.map(msg => {
@@ -631,7 +559,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
           }
           return msg;
         });
-        console.log('[GET messages] Redacted', hiddenMessageIds.size, 'messages');
       }
 
       res.json({ messages });
@@ -644,22 +571,15 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Hide a message (admin or owner only)
   router.post('/:submissionId/messages/:messageId/hide', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      console.log('[POST hide] Hiding message:', req.params.messageId, 'in submission:', req.params.submissionId);
-      
       const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      
       if (!submission) {
         res.status(404).json({ error: 'Submission not found' });
         return;
       }
 
-      // Check if user is admin or submission owner
       const user = await context.userStore.getUserById(req.userId!);
       const isAdmin = user?.roles.includes('admin');
       const isOwner = submission.submitter_id === req.userId;
-      
-      console.log('[POST hide] User:', req.userId, 'isAdmin:', isAdmin, 'isOwner:', isOwner);
-      
       if (!isAdmin && !isOwner) {
         res.status(403).json({ error: 'Only admins and submission owners can hide messages' });
         return;
@@ -667,9 +587,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
 
       const { reason } = req.body;
       context.annotationDb.hideMessage(req.params.messageId, req.params.submissionId, req.userId!, reason);
-      
-      console.log('[POST hide] Message hidden successfully');
-      
       res.json({ success: true });
     } catch (error) {
       console.error('Hide message error:', error);
@@ -709,44 +626,28 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Hide all previous messages (current message + all with order < current.order)
   router.post('/:submissionId/messages/:messageId/hide-previous', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      console.log('[POST hide-previous] Hiding message and all previous:', req.params.messageId);
-      
       const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      
       if (!submission) {
         res.status(404).json({ error: 'Submission not found' });
         return;
       }
 
-      // Check if user is admin or submission owner
       const user = await context.userStore.getUserById(req.userId!);
       const isAdmin = user?.roles.includes('admin');
       const isOwner = submission.submitter_id === req.userId;
-      
-      console.log('[POST hide-previous] User:', req.userId, 'isAdmin:', isAdmin, 'isOwner:', isOwner);
-      
       if (!isAdmin && !isOwner) {
         res.status(403).json({ error: 'Only admins and submission owners can hide messages' });
         return;
       }
 
-      // Get all messages for this submission
       const messages = await context.submissionStore.getMessages(req.params.submissionId);
-      
-      // Find the target message
       const targetMessage = messages.find(m => m.id === req.params.messageId);
       if (!targetMessage) {
         res.status(404).json({ error: 'Message not found' });
         return;
       }
-      
-      // Find all messages with order <= target message order
+
       const messagesToHide = messages.filter(m => m.order <= targetMessage.order);
-      
-      console.log('[POST hide-previous] Target message order:', targetMessage.order);
-      console.log('[POST hide-previous] Hiding', messagesToHide.length, 'messages');
-      
-      // Hide all of them
       const { reason } = req.body;
       let hiddenCount = 0;
       for (const message of messagesToHide) {
@@ -754,14 +655,11 @@ export function createSubmissionRoutes(context: AppContext): Router {
           context.annotationDb.hideMessage(message.id, req.params.submissionId, req.userId!, reason);
           hiddenCount++;
         } catch (err) {
-          console.error('[POST hide-previous] Failed to hide message:', message.id, err);
-          // Continue hiding others even if one fails
+          console.error('Failed to hide message:', message.id, err);
         }
       }
-      
-      console.log('[POST hide-previous] Successfully hidden', hiddenCount, 'messages');
-      
-      res.json({ 
+
+      res.json({
         success: true,
         hidden_count: hiddenCount,
         message_ids: messagesToHide.map(m => m.id)
@@ -799,8 +697,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
       await context.submissionStore.updateMessage(submissionId, messageId, {
         hidden_from_models: hidden === true ? true : undefined
       });
-      
-      console.log(`[POST hidden-from-models] Message ${messageId} hidden_from_models set to ${hidden}`);
       
       res.json({ success: true, hidden_from_models: hidden });
     } catch (error) {
@@ -856,8 +752,6 @@ export function createSubmissionRoutes(context: AppContext): Router {
       await context.submissionStore.updateMessage(submissionId, messageId, {
         metadata: Object.keys(updatedMetadata).length > 0 ? updatedMetadata : undefined
       });
-      
-      console.log(`[POST monospace] Message ${messageId} monospace set to ${monospace}`);
       
       res.json({ success: true, monospace });
     } catch (error) {

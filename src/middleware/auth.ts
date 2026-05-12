@@ -2,23 +2,60 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { User } from '../types/research.js';
 
-export const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
+export interface DecodedToken {
+  userId: string;
+  email: string;
+  roles: User['roles'];
+}
 
 export interface AuthRequest extends Request {
   user?: User;
   userId?: string;
 }
 
+let _cachedJwtSecret: string | null = null;
+
+/**
+ * Read JWT_SECRET lazily so dotenv has a chance to populate process.env first,
+ * and so an unset secret fails loudly at first use rather than silently
+ * accepting a known default. Call `assertJwtSecret()` at boot to fail fast.
+ */
+export function getJwtSecret(): string {
+  if (_cachedJwtSecret !== null) return _cachedJwtSecret;
+
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret === 'change-this-in-production') {
+    throw new Error(
+      'JWT_SECRET is not set (or is still the placeholder value). ' +
+      'Generate a strong value with: openssl rand -hex 64'
+    );
+  }
+  if (secret.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters for security');
+  }
+  _cachedJwtSecret = secret;
+  return _cachedJwtSecret;
+}
+
+/** Call at startup so misconfiguration fails the boot, not the first request. */
+export function assertJwtSecret(): void {
+  getJwtSecret();
+}
+
 export function generateToken(user: User): string {
   return jwt.sign(
-    { 
+    {
       userId: user.id,
       email: user.email,
       roles: user.roles
     },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: '7d' }
   );
+}
+
+export function verifyToken(token: string): DecodedToken {
+  return jwt.verify(token, getJwtSecret()) as DecodedToken;
 }
 
 export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction): void {
@@ -30,17 +67,18 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
     return;
   }
 
-  jwt.verify(token, JWT_SECRET, (err, decoded: any) => {
-    if (err) {
+  jwt.verify(token, getJwtSecret(), (err, decoded) => {
+    if (err || !decoded || typeof decoded === 'string') {
       res.status(403).json({ error: 'Invalid or expired token' });
       return;
     }
 
-    req.userId = decoded.userId;
+    const payload = decoded as DecodedToken;
+    req.userId = payload.userId;
     req.user = {
-      id: decoded.userId,
-      email: decoded.email,
-      roles: decoded.roles,
+      id: payload.userId,
+      email: payload.email,
+      roles: payload.roles,
       name: '', // Will be filled from DB if needed
       created_at: new Date()
     };
@@ -77,18 +115,40 @@ export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction
     return;
   }
 
-  jwt.verify(token, JWT_SECRET, (err, decoded: any) => {
-    if (!err && decoded) {
-      req.userId = decoded.userId;
+  jwt.verify(token, getJwtSecret(), (err, decoded) => {
+    if (!err && decoded && typeof decoded !== 'string') {
+      const payload = decoded as DecodedToken;
+      req.userId = payload.userId;
       req.user = {
-        id: decoded.userId,
-        email: decoded.email,
-        roles: decoded.roles,
+        id: payload.userId,
+        email: payload.email,
+        roles: payload.roles,
         name: '',
         created_at: new Date()
       };
     }
     next();
   });
+}
+
+/**
+ * Best-effort auth parse from raw request headers — for routes that conditionally
+ * widen results based on identity (guests vs users vs researchers vs admins)
+ * without rejecting unauthenticated requests outright.
+ */
+export function parseAuthFromHeaders(authHeader: string | undefined): {
+  userId?: string;
+  roles: User['roles'];
+} {
+  if (!authHeader?.startsWith('Bearer ')) {
+    return { roles: [] };
+  }
+  const token = authHeader.substring(7);
+  try {
+    const decoded = verifyToken(token);
+    return { userId: decoded.userId, roles: decoded.roles || [] };
+  } catch {
+    return { roles: [] };
+  }
 }
 

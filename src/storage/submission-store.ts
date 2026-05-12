@@ -67,34 +67,43 @@ export class SubmissionStore {
       submitted_at: new Date()
     };
 
-    // Validate message tree
+    // Validate before any writes — surface schema/tree errors without leaving
+    // partial state on disk.
     this.validateMessageTree(messages);
 
-    // Store metadata event
-    await this.store.appendEvent(submission.id, 'metadata.jsonl', {
-      timestamp: new Date(),
-      type: 'submission_created',
-      data: submission
-    });
-
-    // Store all messages
-    for (const message of messages) {
-      await this.store.appendEvent(submission.id, 'messages.jsonl', {
+    try {
+      // Write submission data first. If anything below fails, the cleanup
+      // block removes the orphaned shard directory; the index entry is only
+      // appended on the happy path, so a partial create never appears in
+      // listings.
+      await this.store.appendEvent(submission.id, 'metadata.jsonl', {
         timestamp: new Date(),
-        type: 'message_added',
-        data: message
+        type: 'submission_created',
+        data: submission
       });
+
+      for (const message of messages) {
+        await this.store.appendEvent(submission.id, 'messages.jsonl', {
+          timestamp: new Date(),
+          type: 'message_added',
+          data: message
+        });
+      }
+
+      // Commit point: index append is the last durable write.
+      await this.indexStore.appendEvent({
+        timestamp: new Date(),
+        type: 'submission_indexed',
+        data: { submissionId: submission.id }
+      });
+    } catch (err) {
+      // Best-effort cleanup of partial data. Swallow cleanup errors so the
+      // original failure surfaces to the caller.
+      await this.store.removeShard(submission.id).catch(() => {});
+      throw err;
     }
 
-    // Add to index
-    await this.indexStore.appendEvent({
-      timestamp: new Date(),
-      type: 'submission_indexed',
-      data: { submissionId: submission.id }
-    });
     this.submissionIndex.add(submission.id);
-
-    // Cache in memory
     this.submissions.set(submission.id, submission);
     const messageMap = new Map(messages.map(m => [m.id, m]));
     this.messages.set(submission.id, messageMap);
@@ -205,9 +214,15 @@ export class SubmissionStore {
   }
 
   /**
-   * Update submission metadata
+   * Update submission metadata. Throws if the submission does not exist —
+   * previously this silently created an orphaned events file under a fake id.
    */
   async updateSubmission(submissionId: string, updates: Submission): Promise<void> {
+    const existing = await this.getSubmission(submissionId);
+    if (!existing) {
+      throw new Error(`Cannot update unknown submission: ${submissionId}`);
+    }
+
     await this.store.appendEvent(submissionId, 'metadata.jsonl', {
       timestamp: new Date(),
       type: 'submission_updated',

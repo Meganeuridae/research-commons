@@ -117,5 +117,9 @@ export class ParticipantMappingStore {
     const lines = Array.from(this.mappings.values()).map(m => JSON.stringify(m));
     await fs.writeFile(this.mappingsPath, lines.join('\n') + '\n', 'utf-8');
   }
+
+  // No long-lived handles; provided for symmetry with sibling stores so the
+  // shutdown handler can call close() uniformly.
+  async close(): Promise<void> {}
 }
 
