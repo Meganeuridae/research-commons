@@ -328,11 +328,9 @@ export function createSubmissionRoutes(context: AppContext): Router {
         return;
       }
 
-      // Remove pinned_message_id from metadata
-      const updatedMetadata = {
-        ...submission.metadata
-      };
-      delete (updatedMetadata as any).pinned_message_id;
+      // pinned_message_id is .optional() in the schema, so delete is typesafe
+      const updatedMetadata = { ...submission.metadata };
+      delete updatedMetadata.pinned_message_id;
 
       const updatedSubmission = {
         ...submission,
