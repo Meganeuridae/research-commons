@@ -1,0 +1,58 @@
+version: 2
+
+# Dependabot watches dependencies in this repo, opens PRs proposing updates,
+# and surfaces security advisories. Set up after the Mini Shai-Hulud npm
+# worm (2026-05-11) as the GitHub-side complement to the user-level
+# `min-release-age=7` setting in ~/.npmrc.
+#
+# Key behaviors:
+#   - cooldown.default-days: 7
+#       Dependabot won't propose an update until the new version has been
+#       on the registry for 7+ days. Mirrors the npm min-release-age so a
+#       freshly-published malicious version is filtered out at both the
+#       PR-proposal stage and the install stage.
+#   - Security updates bypass cooldown automatically (GitHub behavior, not
+#       configured here). Real CVE patches still land fast.
+#   - No automerge. Every dep change is a reviewable PR.
+
+updates:
+  # Backend (Express server)
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      # Bundle non-major updates into a single PR to keep noise low.
+      # Major bumps still get individual PRs (they tend to need their own review).
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Frontend (Vue SPA)
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Keep the GitHub Actions runner versions current too. Action pins are a
+  # less-discussed supply-chain surface (a compromised action runs with the
+  # repo's secrets).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
