@@ -93,6 +93,11 @@ async function main() {
   // ALLOWED_ORIGINS env var as a comma-separated list, e.g.
   // "https://commons.animalabs.ai,https://staging.animalabs.ai"). In dev, fall
   // back to permissive CORS so localhost:5173 (vite) can hit localhost:3020.
+  //
+  // In production we FAIL CLOSED if ALLOWED_ORIGINS is unset — previously
+  // this only warned and fell back to permissive cors(), which silently
+  // reintroduced broad cross-origin access after any deployment that forgot
+  // the env var.
   const allowedOrigins = parseAllowedOrigins();
   if (allowedOrigins && allowedOrigins.length > 0) {
     app.use(cors({
@@ -101,10 +106,12 @@ async function main() {
       methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization']
     }));
+  } else if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'ALLOWED_ORIGINS must be set in production. Provide a comma-separated ' +
+      'list of allowed origins, e.g. "https://commons.example.com".'
+    );
   } else {
-    if (process.env.NODE_ENV === 'production') {
-      console.warn('⚠️  ALLOWED_ORIGINS is not set; allowing all origins. Set it in production.');
-    }
     app.use(cors());
   }
   app.use(compression()); // Gzip compress all responses
