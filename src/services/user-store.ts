@@ -11,6 +11,20 @@ interface PasswordResetToken {
 }
 
 /**
+ * Hash a password-reset token before persisting it. The raw token has 256 bits
+ * of entropy from crypto.randomBytes, so a plain SHA-256 (no salt, no HMAC) is
+ * fine here — rainbow tables are infeasible for that keyspace, and any
+ * stretching is wasted on a value used once and expired in 24h.
+ *
+ * We hash so that the on-disk event log (a permanent record) doesn't act as a
+ * collection of valid bearer tokens for whoever can read it. Previously the
+ * raw token was persisted in plaintext to the JSONL log.
+ */
+function hashResetToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+/**
  * Manages user data (event-sourced)
  */
 export class UserStore {
@@ -117,17 +131,24 @@ export class UserStore {
         break;
       }
       case 'password_reset_token_created': {
-        const { token, userId, email, expiresAt } = event.data;
+        // Modern events persist `tokenHash` (SHA-256 hex of the raw token);
+        // legacy events from the first version of this code persisted the raw
+        // `token`. Accept either, but always store by hash so validation can
+        // compare without ever holding the raw token in memory.
+        const { tokenHash, token, userId, email, expiresAt } = event.data;
+        const hashKey = tokenHash ?? (token ? hashResetToken(token) : null);
+        if (!hashKey) break;
         const expires = new Date(expiresAt);
         // Skip tokens that already expired before the server came up.
         if (expires.getTime() > Date.now()) {
-          this.passwordResetTokens.set(token, { userId, email, expiresAt: expires });
+          this.passwordResetTokens.set(hashKey, { userId, email, expiresAt: expires });
         }
         break;
       }
       case 'password_reset_token_consumed': {
-        const { token } = event.data;
-        this.passwordResetTokens.delete(token);
+        const { tokenHash, token } = event.data;
+        const hashKey = tokenHash ?? (token ? hashResetToken(token) : null);
+        if (hashKey) this.passwordResetTokens.delete(hashKey);
         break;
       }
       case 'user_password_updated': {
@@ -333,19 +354,22 @@ export class UserStore {
     const user = this.users.get(userId);
     if (!user) return null;
 
+    // Raw token: returned to caller for the emailed URL. Never persisted.
     const token = crypto.randomBytes(32).toString('hex');
+    // Hash: persisted to the event log and used as the in-memory map key.
+    // Knowing the hash isn't enough to redeem the token; an attacker with
+    // read access to data/users.jsonl can no longer impersonate password
+    // resets.
+    const tokenHash = hashResetToken(token);
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    // Persist via the event store so reset links survive a server restart
-    // (previously the token map was in-memory only and any redeploy mid-
-    // reset would break user-facing reset links).
     await this.usersFile.appendEvent({
       timestamp: new Date(),
       type: 'password_reset_token_created',
-      data: { token, userId, email, expiresAt: expiresAt.toISOString() }
+      data: { tokenHash, userId, email, expiresAt: expiresAt.toISOString() }
     });
 
-    this.passwordResetTokens.set(token, { userId, email, expiresAt });
+    this.passwordResetTokens.set(tokenHash, { userId, email, expiresAt });
 
     this.cleanupExpiredTokens();
 
@@ -353,12 +377,12 @@ export class UserStore {
   }
 
   async validatePasswordResetToken(token: string): Promise<{ userId: string; email: string } | null> {
-    const tokenInfo = this.passwordResetTokens.get(token);
+    const tokenHash = hashResetToken(token);
+    const tokenInfo = this.passwordResetTokens.get(tokenHash);
     if (!tokenInfo) return null;
 
-    // Check if expired
     if (new Date() > tokenInfo.expiresAt) {
-      this.passwordResetTokens.delete(token);
+      this.passwordResetTokens.delete(tokenHash);
       return null;
     }
 
@@ -368,21 +392,22 @@ export class UserStore {
   async consumePasswordResetToken(token: string): Promise<{ userId: string; email: string } | null> {
     const result = await this.validatePasswordResetToken(token);
     if (result) {
+      const tokenHash = hashResetToken(token);
       await this.usersFile.appendEvent({
         timestamp: new Date(),
         type: 'password_reset_token_consumed',
-        data: { token }
+        data: { tokenHash }
       });
-      this.passwordResetTokens.delete(token);
+      this.passwordResetTokens.delete(tokenHash);
     }
     return result;
   }
 
   private cleanupExpiredTokens(): void {
     const now = new Date();
-    for (const [token, info] of this.passwordResetTokens.entries()) {
+    for (const [hashKey, info] of this.passwordResetTokens.entries()) {
       if (now > info.expiresAt) {
-        this.passwordResetTokens.delete(token);
+        this.passwordResetTokens.delete(hashKey);
       }
     }
   }
