@@ -1,21 +1,25 @@
 import { Router } from 'express';
 import { AppContext } from '../index.js';
+import { checkSubmissionAccess, denyIfNeeded } from '../middleware/submission-auth.js';
 
 /**
  * Get all ontologies and ranking systems available for a submission
- * Combines: topic-derived (dynamic lookup) + explicitly attached
+ * Combines: topic-derived (dynamic lookup) + explicitly attached.
+ *
+ * Both endpoints enforce submission read access. Previously they returned
+ * the topic/system associations for any submission UUID regardless of
+ * visibility, which leaked research category and methodology metadata for
+ * private/researcher-only submissions.
  */
 export function createSubmissionSystemsRoutes(context: AppContext): Router {
   const router = Router();
 
-  // Get combined ontologies for submission
+  // Get combined ontologies for submission (read access enforced).
   router.get('/:submissionId/ontologies', async (req, res) => {
     try {
-      const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      if (!submission) {
-        res.status(404).json({ error: 'Submission not found' });
-        return;
-      }
+      const access = await checkSubmissionAccess(context, req, req.params.submissionId, 'read');
+      if (denyIfNeeded(res, access)) return;
+      const submission = access.submission;
 
       const result: Array<{
         ontology_id: string
@@ -68,14 +72,12 @@ export function createSubmissionSystemsRoutes(context: AppContext): Router {
     }
   });
 
-  // Get combined ranking systems for submission
+  // Get combined ranking systems for submission (read access enforced).
   router.get('/:submissionId/ranking-systems', async (req, res) => {
     try {
-      const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      if (!submission) {
-        res.status(404).json({ error: 'Submission not found' });
-        return;
-      }
+      const access = await checkSubmissionAccess(context, req, req.params.submissionId, 'read');
+      if (denyIfNeeded(res, access)) return;
+      const submission = access.submission;
 
       const result: Array<{
         ranking_system_id: string

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { AppContext } from '../index.js';
 import { authenticateToken, AuthRequest, parseAuthFromHeaders } from '../middleware/auth.js';
+import { checkSubmissionAccess, denyIfNeeded } from '../middleware/submission-auth.js';
 import { CreateSubmissionRequestSchema, UpdateSubmissionRequestSchema, Message } from '../types/submission.js';
 
 export function createSubmissionRoutes(context: AppContext): Router {
@@ -482,25 +483,22 @@ export function createSubmissionRoutes(context: AppContext): Router {
   // Get submission messages (supports both authenticated and anonymous access)
   router.get('/:submissionId/messages', async (req, res) => {
     try {
+      // Apply the same visibility policy as GET /submissions/:id before
+      // loading any message content. Previously this route only redacted
+      // hidden messages but otherwise returned full content for ANY caller
+      // with a submission UUID, even on `private` / `researcher` submissions
+      // they were not allowed to read.
+      const access = await checkSubmissionAccess(context, req, req.params.submissionId, 'read');
+      if (denyIfNeeded(res, access)) return;
+      const { submission, userId, roles: userRoles } = access;
+
       let messages = await context.submissionStore.getMessages(req.params.submissionId);
-      
-      // Get submission to check ownership
-      const submission = await context.submissionStore.getSubmission(req.params.submissionId);
-      
-      if (messages.length === 0) {
-        // Check if submission exists
-        if (!submission) {
-          res.status(404).json({ error: 'Submission not found' });
-          return;
-        }
-      }
 
-      // Filter hidden messages for non-privileged users (optional auth)
-      const { userId, roles: userRoles } = parseAuthFromHeaders(req.headers.authorization);
-
-      // Redact hidden messages for non-privileged users (not researchers/admins/owners)
+      // Hidden-message redaction is a separate (looser) concern from visibility:
+      // researchers / admins / the owner see hidden content as-is; others see
+      // it replaced with block characters of the same length.
       const isResearcherOrAdmin = userRoles.includes('researcher') || userRoles.includes('admin');
-      const isOwner = submission && userId === submission.submitter_id;
+      const isOwner = userId === submission.submitter_id;
       const canViewHidden = isResearcherOrAdmin || isOwner;
 
       const hiddenMessageIds = new Set(context.annotationDb.getHiddenMessagesBySubmission(req.params.submissionId));

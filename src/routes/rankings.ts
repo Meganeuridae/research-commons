@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { AppContext } from '../index.js';
 import { authenticateToken, AuthRequest, requireRole } from '../middleware/auth.js';
-import { 
-  CreateRankingSystemRequestSchema, 
+import { checkSubmissionAccess, denyIfNeeded } from '../middleware/submission-auth.js';
+import {
+  CreateRankingSystemRequestSchema,
   AttachRankingSystemRequestSchema
 } from '../types/ranking.js';
 
@@ -131,11 +132,16 @@ export function createRankingRoutes(context: AppContext): Router {
     }
   });
 
-  // Attach ranking system to submission
+  // Attach ranking system to submission. Requires `modify` access (owner /
+  // researcher / admin). Previously any authenticated caller could attach
+  // arbitrary ranking systems to submissions they didn't control.
   router.post('/attach', authenticateToken, async (req: AuthRequest, res) => {
     try {
       const data = AttachRankingSystemRequestSchema.parse(req.body);
-      
+
+      const access = await checkSubmissionAccess(context, req, data.submission_id, 'modify');
+      if (denyIfNeeded(res, access)) return;
+
       const submissionRankingSystem = {
         id: uuidv4(),
         submission_id: data.submission_id,
@@ -145,9 +151,9 @@ export function createRankingRoutes(context: AppContext): Router {
         usage_permissions: data.usage_permissions,
         is_from_topic: false
       };
-      
+
       context.annotationDb.attachRankingSystem(submissionRankingSystem);
-      
+
       res.status(201).json(submissionRankingSystem);
     } catch (error: any) {
       if (error.name === 'ZodError') {
@@ -159,9 +165,12 @@ export function createRankingRoutes(context: AppContext): Router {
     }
   });
 
-  // Get attached ranking systems for submission
+  // Get attached ranking systems for submission (read access enforced).
   router.get('/submission/:submissionId', async (req, res) => {
     try {
+      const access = await checkSubmissionAccess(context, req, req.params.submissionId, 'read');
+      if (denyIfNeeded(res, access)) return;
+
       const systems = context.annotationDb.getSubmissionRankingSystems(req.params.submissionId);
       res.json({ ranking_systems: systems });
     } catch (error) {
@@ -170,19 +179,22 @@ export function createRankingRoutes(context: AppContext): Router {
     }
   });
 
-  // Detach ranking system from submission
+  // Detach ranking system from submission. Requires `modify` access.
   router.delete('/submission/:submissionId/system/:systemId', authenticateToken, async (req: AuthRequest, res) => {
     try {
+      const access = await checkSubmissionAccess(context, req, req.params.submissionId, 'modify');
+      if (denyIfNeeded(res, access)) return;
+
       const success = context.annotationDb.detachRankingSystem(
         req.params.submissionId,
         req.params.systemId
       );
-      
+
       if (!success) {
         res.status(403).json({ error: 'Cannot detach ranking system from topic' });
         return;
       }
-      
+
       res.status(200).json({ success: true });
     } catch (error) {
       console.error('Detach ranking system error:', error);
