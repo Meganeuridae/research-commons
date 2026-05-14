@@ -149,4 +149,44 @@ describe('UserStore password reset tokens', () => {
     expect(validated).not.toBeNull();
     await store.close();
   });
+
+  it('does not persist the raw token in the event log (hashed only)', async () => {
+    const store = new UserStore(tmpDir);
+    await store.init();
+    await store.createUser('a@example.com', 'password123', 'A');
+    const created = await store.createPasswordResetToken('a@example.com');
+    expect(created).not.toBeNull();
+    await store.close();
+
+    const fs = await import('fs/promises');
+    const log = await fs.readFile(`${tmpDir}/users.jsonl`, 'utf8');
+    // The raw token must not appear anywhere in the on-disk log; otherwise
+    // anyone with read access to data/users.jsonl could redeem reset tokens.
+    expect(log).not.toContain(created!.token);
+    // The hashed form should be present.
+    const { createHash } = await import('crypto');
+    const expectedHash = createHash('sha256').update(created!.token).digest('hex');
+    expect(log).toContain(expectedHash);
+  });
+
+  it('replays legacy raw-token events by hashing them on load (back-compat)', async () => {
+    // Manually emit a legacy-shape event (with raw `token`) to simulate logs
+    // written by the first version of the persistence code in PR #2.
+    const fs = await import('fs/promises');
+    const legacyToken = 'legacy-raw-token-aaaaaaaaaaaaaaaaaaaaaaaa';
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const legacy = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'password_reset_token_created',
+      data: { token: legacyToken, userId: 'u1', email: 'legacy@example.com', expiresAt },
+    }) + '\n';
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(`${tmpDir}/users.jsonl`, legacy);
+
+    const store = new UserStore(tmpDir);
+    await store.init();
+    const validated = await store.validatePasswordResetToken(legacyToken);
+    expect(validated?.userId).toBe('u1');
+    await store.close();
+  });
 });

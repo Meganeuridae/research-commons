@@ -73,6 +73,38 @@ function extractTextFromBlocks(contentBlocks: any[]): string {
     .join('\n');
 }
 
+/**
+ * Visibility values that are safe to expose via unauthenticated OG previews.
+ * Crawlers don't authenticate, so anything tighter than this leaks restricted
+ * content to whoever knows the submission ID. Previously the OG path only
+ * blocked `private`, which let `researcher`-visibility submissions leak.
+ */
+const OG_PUBLIC_VISIBILITIES = new Set(['public', 'unlisted']);
+
+/**
+ * Pick a trusted public base URL for absolute links inside generated OG HTML.
+ *
+ * In production this MUST come from configuration (BASE_URL or APP_URL).
+ * Falling back to `Host` / `X-Forwarded-Proto` headers in production means an
+ * attacker can poison the canonical/og:url/og:image links by sending a crafted
+ * Host header to a known submission path — useful for phishing, social-card
+ * spoofing, or poisoning crawler/CDN caches.
+ *
+ * In development we still fall back to request headers so `vite` on a random
+ * port and ad-hoc tunnels (e.g. ngrok) work without configuration.
+ */
+function getOgBaseUrl(req: Request): string | null {
+  const configured = process.env.BASE_URL || process.env.APP_URL;
+  if (configured) {
+    return configured.startsWith('http') ? configured : `https://${configured}`;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return null;
+  }
+  const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  return `${protocol}://${req.headers.host}`;
+}
+
 export function createOgMetaRoutes(context: AppContext): Router {
   const router = Router();
 
@@ -87,9 +119,11 @@ export function createOgMetaRoutes(context: AppContext): Router {
         return;
       }
 
-      // Check visibility - only public/unlisted get previews
-      if (submission.visibility === 'private') {
-        res.status(403).send('Private');
+      // Unauthenticated OG previews must only expose content that's safe for
+      // public sharing. Previously this only checked `private`, which leaked
+      // `researcher`-visibility submission titles and message text.
+      if (!OG_PUBLIC_VISIBILITIES.has(submission.visibility)) {
+        res.status(403).send('Restricted');
         return;
       }
 
@@ -202,8 +236,11 @@ export function createOgMiddleware(context: AppContext) {
         return next(); // Let normal 404 handling take over
       }
 
-      // Check visibility
-      if (submission.visibility === 'private') {
+      // Same restricted-visibility check as the /og-image endpoint. Anything
+      // other than public/unlisted is hidden from crawlers — `researcher`
+      // submissions previously leaked title + first-message text through this
+      // path.
+      if (!OG_PUBLIC_VISIBILITIES.has(submission.visibility)) {
         return next();
       }
 
@@ -224,11 +261,16 @@ export function createOgMiddleware(context: AppContext) {
         ? escapeHtml(truncate(extractTextFromBlocks(previewMessage.content_blocks), 200))
         : 'A conversation on Research Commons';
       
-      const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-      let baseUrl = process.env.BASE_URL || `${protocol}://${req.headers.host}`;
-      // Ensure baseUrl has protocol
-      if (baseUrl && !baseUrl.startsWith('http')) {
-        baseUrl = `https://${baseUrl}`;
+      // Pick base URL from configured BASE_URL/APP_URL (production) or from
+      // request headers (dev only). Refusing the header fallback in
+      // production closes the Host-header-poisoning vector: previously a
+      // crafted Host header could inject attacker-controlled values into
+      // og:url, og:image, and the canonical link, enabling crawler-cache
+      // poisoning and social-preview spoofing.
+      const baseUrl = getOgBaseUrl(req);
+      if (!baseUrl) {
+        console.warn('OG middleware: BASE_URL is not configured in production; skipping preview render.');
+        return next();
       }
       const url = `${baseUrl}/submissions/${submissionId}`;
       const imageUrl = `${baseUrl}/api/og-image/${submissionId}`;
