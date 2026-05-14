@@ -2,10 +2,11 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { AppContext } from '../index.js';
 import { authenticateToken, AuthRequest, requireRole } from '../middleware/auth.js';
-import { 
-  CreateOntologyRequestSchema, 
+import { checkSubmissionAccess, denyIfNeeded } from '../middleware/submission-auth.js';
+import {
+  CreateOntologyRequestSchema,
   AttachOntologyRequestSchema,
-  ApplyTagsRequestSchema 
+  ApplyTagsRequestSchema
 } from '../types/ontology.js';
 
 export function createOntologyRoutes(context: AppContext): Router {
@@ -105,11 +106,18 @@ export function createOntologyRoutes(context: AppContext): Router {
     }
   });
 
-  // Attach ontology to submission
+  // Attach ontology to submission. Requires `modify` access (owner /
+  // researcher / admin). Previously any authenticated caller — including a
+  // bare `contributor` — could attach arbitrary ontologies to submissions
+  // they didn't control, affecting how the submission is annotated and
+  // displayed.
   router.post('/attach', authenticateToken, async (req: AuthRequest, res) => {
     try {
       const data = AttachOntologyRequestSchema.parse(req.body);
-      
+
+      const access = await checkSubmissionAccess(context, req, data.submission_id, 'modify');
+      if (denyIfNeeded(res, access)) return;
+
       const submissionOntology = {
         id: uuidv4(),
         submission_id: data.submission_id,
@@ -119,9 +127,9 @@ export function createOntologyRoutes(context: AppContext): Router {
         usage_permissions: data.usage_permissions,
         is_default: false
       };
-      
+
       context.annotationDb.attachOntology(submissionOntology);
-      
+
       res.status(201).json(submissionOntology);
     } catch (error: any) {
       if (error.name === 'ZodError') {
@@ -133,9 +141,12 @@ export function createOntologyRoutes(context: AppContext): Router {
     }
   });
 
-  // Get attached ontologies for submission
+  // Get attached ontologies for submission (read access enforced).
   router.get('/submission/:submissionId', async (req, res) => {
     try {
+      const access = await checkSubmissionAccess(context, req, req.params.submissionId, 'read');
+      if (denyIfNeeded(res, access)) return;
+
       const ontologies = context.annotationDb.getSubmissionOntologies(req.params.submissionId);
       res.json({ ontologies });
     } catch (error) {
@@ -144,13 +155,24 @@ export function createOntologyRoutes(context: AppContext): Router {
     }
   });
 
-  // Apply tags to selection
+  // Apply tags to selection. Tag application is an annotation operation, so
+  // requires `annotate` access on the parent submission (resolved via the
+  // selection). Previously: any authenticated user could vote tags onto
+  // selections inside restricted submissions.
   router.post('/tags/apply', authenticateToken, async (req: AuthRequest, res) => {
     try {
       const data = ApplyTagsRequestSchema.parse(req.body);
-      
+
+      const selection = context.annotationDb.getSelection(data.selection_id);
+      if (!selection) {
+        res.status(404).json({ error: 'Selection not found' });
+        return;
+      }
+      const access = await checkSubmissionAccess(context, req, selection.submission_id, 'annotate');
+      if (denyIfNeeded(res, access)) return;
+
       context.annotationDb.applyTags(data.selection_id, data.tag_ids, req.userId!);
-      
+
       res.status(200).json({ success: true });
     } catch (error: any) {
       if (error.name === 'ZodError') {
